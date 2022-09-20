@@ -3,6 +3,7 @@
 #define inno_space_fsp_types_h
 
 #include "include/udef.h"
+#include "page0page.h"
 
 /** @name Flags for inserting records in order
 If records are inserted in order, there are the following

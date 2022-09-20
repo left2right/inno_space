@@ -265,5 +265,7 @@ class File_segment_inode {
   fseg_inode_t *m_fseg_inode;
 };
 
+page_no_t xdes_find_bit(xdes_t *descr, ulint bit, bool val);
+
 /* @} */
 #endif

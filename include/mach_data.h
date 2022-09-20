@@ -6,6 +6,25 @@
 
 #include "include/udef.h"
 
+enum mlog_id_t {
+  /** if the mtr contains only one log record for one page,
+  i.e., write_initial_log_record has been called only once,
+  this flag is ORed to the type of that first log record */
+  MLOG_SINGLE_REC_FLAG = 128,
+
+  /** one byte is written */
+  MLOG_1BYTE = 1,
+
+  /** 2 bytes ... */
+  MLOG_2BYTES = 2,
+
+  /** 4 bytes ... */
+  MLOG_4BYTES = 4,
+
+  /** 8 bytes ... */
+  MLOG_8BYTES = 8,
+};
+
 /** The following function is used to fetch data from one byte.
 @param[in]	b	pointer to a byte to read
 @return ulint integer, >= 0, < 256 */
@@ -16,6 +35,8 @@ uint16_t mach_read_from_2(const byte *b);
 uint32_t mach_read_from_4(const byte *b);
 
 uint64_t mach_read_from_6(const byte *b);
+
+uint32_t mach_read_ulint(const byte *ptr, mlog_id_t type);
 
 /** The following function is used to fetch data from 8 consecutive
  * bytes. The most significant byte is at the lowest address.

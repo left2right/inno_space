@@ -28,6 +28,8 @@ int fd;
 
 byte* read_buf;
 byte* inode_page_buf;
+byte* xdes_page_buf;
+byte* data_page_buf;
 
 static void usage()
 {
@@ -38,6 +40,7 @@ static void usage()
       "\t-f test/t.ibd     -- ibd file \n"
       "\t\t-c list-page-type      -- show all page type\n"
       "\t\t-c index-summary       -- show indexes information\n"
+      "\t\t-c record-count       -- show table record count\n"
       "\t-p page_num       -- show page information\n"
       "\t\t-c show-records        -- show all records information\n"
       "\t-u page_num       -- update page checksum\n"
@@ -48,6 +51,8 @@ static void usage()
       "./inno -f ~/git/primary/dbs2250/sbtest/sbtest1.ibd -c list-page-type\n"
       "Show sbtest1.ibd all indexes information\n"
       "./inno -f ~/git/primary/dbs2250/sbtest/sbtest1.ibd -c index-summary\n"
+      "Show sbtest1.ibd primary index record count\n"
+      "./inno -f ~/git/primary/dbs2250/sbtest/sbtest1.ibd -c record-count\n"
       "Show specify page information\n"
       "./inno -f ~/git/primary/dbs2250/sbtest/sbtest1.ibd -p 10\n"
       "Delete specify page\n"
@@ -106,6 +111,7 @@ void ShowIndexHeader(uint32_t page_num, bool is_show_records) {
     return;
   }
   printf("Number of Directory Slots: %hu\n", mach_read_from_2(read_buf + PAGE_HEADER));
+  printf("Number of Records in Heap: %hu\n", mach_read_from_2(read_buf + PAGE_HEADER + PAGE_N_HEAP) & 0x7fff);
   printf("Garbage Space: %hu\n", mach_read_from_2(read_buf + PAGE_HEADER + PAGE_GARBAGE));
   printf("Number of Records: %hu\n", mach_read_from_2(read_buf + PAGE_HEADER + PAGE_N_RECS));
   printf("Max Trx id: %lu\n", mach_read_from_8(read_buf + PAGE_HEADER + PAGE_MAX_TRX_ID));
@@ -747,6 +753,180 @@ void FindRootPage() {
   return;
 }
 
+page_no_t PageRecStatsAndRetPrev(uint32_t page_num, uint64 &tatol_rec, uint64 &total_del_mark, bool use) {
+  posix_memalign((void**)&data_page_buf, kPageSize, kPageSize);
+  uint64_t offset = (uint64_t)kPageSize * (uint64_t)page_num;
+  int ret = pread(fd, data_page_buf, kPageSize, offset);
+  if (ret == -1) {
+    printf("PageRecStatsAndRetPrev read error %d\n", ret);
+    return FIL_NULL;
+  }
+
+  page_no_t prev_page = mach_read_from_4(data_page_buf + FIL_PAGE_PREV);
+
+  uint16_t  heap_rec_num = mach_read_from_2(data_page_buf + PAGE_HEADER + PAGE_N_HEAP) & 0x7fff;
+  uint16_t  rec_num = mach_read_from_2(data_page_buf + PAGE_HEADER + PAGE_N_RECS);
+
+  if (use) {
+    tatol_rec += (uint64)rec_num;
+    total_del_mark += (uint64)(heap_rec_num - rec_num - 2);
+  }
+  free(data_page_buf);
+  return prev_page;
+}
+
+page_no_t PageRecStatsAndRetNext(uint32_t page_num, uint64 &tatol_rec, uint64 &total_del_mark, bool use) {
+  posix_memalign((void**)&data_page_buf, kPageSize, kPageSize);
+  uint64_t offset = (uint64_t)kPageSize * (uint64_t)page_num;
+  int ret = pread(fd, data_page_buf, kPageSize, offset);
+  if (ret == -1) {
+    printf("PageRecStatsAndRetNext read error %d\n", ret);
+    return FIL_NULL;
+  }
+
+  page_no_t next_page = mach_read_from_4(data_page_buf + FIL_PAGE_NEXT);
+
+  uint16_t  heap_rec_num = mach_read_from_2(data_page_buf + PAGE_HEADER + PAGE_N_HEAP) & 0x7fff;
+  uint16_t  rec_num = mach_read_from_2(data_page_buf + PAGE_HEADER + PAGE_N_RECS);
+
+  if (use) {
+    tatol_rec += (uint64)rec_num;
+    total_del_mark += (uint64)(heap_rec_num - rec_num - 2);
+  }
+  free(data_page_buf);
+  return next_page;
+}
+
+void ShowPrimaryIndexRecStats() {
+  struct stat stat_buf;
+  int ret = fstat(fd, &stat_buf);
+  if (ret == -1) {
+    printf("ShowPrimaryIndexRecStats read error %d\n", ret);
+    return;
+  }
+
+  int block_num = stat_buf.st_size / kPageSize;
+
+  page_type_t page_type = 0;
+  uint64_t offset = 0;
+  space_id_t space_id = 0;
+  bool primary_found = 0;
+  uint64 total_rec = 0;
+  uint64 total_del_mark = 0;
+  uint64_t seg_id = 0;
+  for (int i = 0; i < block_num; i++) {
+    offset = (uint64_t)kPageSize * (uint64_t)i;
+    ret = pread(fd, read_buf, kPageSize, offset);
+
+    if (i == 0) {
+      space_id = mach_read_from_4(FSP_HEADER_OFFSET + read_buf + FSP_SPACE_ID);
+    }
+    page_type = fil_page_get_type(read_buf);
+    if (page_type == FIL_PAGE_INDEX) {
+      if (btr_root_fseg_validate(FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF + read_buf, space_id)
+          && btr_root_fseg_validate(FIL_PAGE_DATA + PAGE_BTR_SEG_TOP + read_buf, space_id)) {
+        if (primary_found == 0) {
+          printf("========Primary index========\n");
+          printf("Primary index root space_id %u root page %d\n", space_id, i);
+          primary_found = 1;
+        } else {
+          continue;
+        }
+
+        page_no_t page_no = FIL_NULL;
+        page_no_t prev_page_no = FIL_NULL;
+        page_no_t next_page_no = FIL_NULL;
+        uint16_t level = mach_read_from_2(read_buf + PAGE_HEADER + PAGE_LEVEL);
+        printf("ShowPrimaryIndexRecStats level %d \n", level);
+        if (level == 0) {
+          page_no = i;
+          PageRecStatsAndRetPrev(page_no, total_rec, total_del_mark, true);
+        }
+
+        fseg_header_t *seg_header;
+        seg_header = read_buf + PAGE_HEADER + PAGE_BTR_SEG_LEAF;
+        fil_addr_t inode_addr;
+        inode_addr.page = mach_read_from_4(seg_header + FSEG_HDR_PAGE_NO);
+        inode_addr.boffset = mach_read_from_2(seg_header + FSEG_HDR_OFFSET);
+
+        posix_memalign((void**)&inode_page_buf, kPageSize, kPageSize);
+        offset = (uint64_t)kPageSize * (uint64_t)inode_addr.page;
+        ret = pread(fd, inode_page_buf, kPageSize, offset);
+        fseg_inode_t *inode = inode_page_buf + inode_addr.boffset;
+        seg_id = mach_read_from_8(inode + FSEG_ID);
+
+        // get page_no from FSEG_FRAG_ARR
+        for (i = 0; (page_no == FIL_NULL) && (i < FSEG_FRAG_ARR_N_SLOTS); i++) {
+          page_no = mach_read_from_4(inode + FSEG_FRAG_ARR + i * FSEG_FRAG_SLOT_SIZE);
+          if (FIL_NULL != page_no) {
+            break;
+          }
+        }
+
+        // get page no from FSEG_FULL
+        if ((page_no == FIL_NULL) && flst_get_len(inode + FSEG_FULL) > 0 ) {
+          fil_addr_t first = flst_get_first(inode + FSEG_FULL);
+          if (first.page != FIL_NULL) {
+            page_no = first.page;
+            posix_memalign((void**)&xdes_page_buf, kPageSize, kPageSize);
+            offset = (uint64_t)kPageSize * (uint64_t)first.page;
+            ret = pread(fd, xdes_page_buf, kPageSize, offset);
+            xdes_t *xdes = xdes_page_buf + first.boffset;
+            ut_a(mach_read_from_8(xdes + XDES_ID) == seg_id);
+            page_no = xdes_find_bit(xdes, XDES_FREE_BIT, false);
+            ut_a(page_no != FIL_NULL);
+          }
+        }
+
+        // get page no from FSEG_NOT_FULL
+        if (page_no == FIL_NULL && flst_get_len(inode + FSEG_NOT_FULL) > 0 ) {
+          fil_addr_t first = flst_get_first(inode + FSEG_NOT_FULL);
+          if (first.page != FIL_NULL) {
+            page_no = first.page;
+            posix_memalign((void**)&xdes_page_buf, kPageSize, kPageSize);
+            offset = (uint64_t)kPageSize * (uint64_t)first.page;
+            ret = pread(fd, xdes_page_buf, kPageSize, offset);
+            xdes_t *xdes = xdes_page_buf + first.boffset;
+            ut_a(mach_read_from_8(xdes + XDES_ID) == seg_id);
+            page_no = xdes_find_bit(xdes, XDES_FREE_BIT, false);
+            ut_a(page_no != FIL_NULL);
+          }
+        }
+
+        if (page_no == FIL_NULL) {
+          printf("ShowPrimaryIndexRecStats found page_no FIL_NULL error\n");
+        }
+
+        prev_page_no = PageRecStatsAndRetPrev(page_no, total_rec, total_del_mark, true);
+        next_page_no = PageRecStatsAndRetNext(page_no, total_rec, total_del_mark, false);
+        while (prev_page_no != FIL_NULL) {
+          page_no_t prev = FIL_NULL;
+          prev = PageRecStatsAndRetPrev(prev_page_no, total_rec, total_del_mark, true);
+          prev_page_no = prev;
+        }
+
+        while (next_page_no != FIL_NULL) {
+          page_no_t next = FIL_NULL;
+          next = PageRecStatsAndRetNext(next_page_no, total_rec, total_del_mark, true);
+          next_page_no = next;
+        }
+
+        printf("Records Num: %llu\n", total_rec);
+        printf("Delete Mark Records Num: %llu\n", total_del_mark);
+
+        free(inode_page_buf);
+        free(xdes_page_buf);
+        printf("\n");
+        if(primary_found) break;
+      }
+    }
+  }
+
+  if (total_del_mark > total_rec) printf("**Suggestion** : too many dele mark records %lu than user records %lu\n", total_del_mark, total_rec);
+
+  return;
+}
+
 void ShowSpaceIndexs() {
   printf("==========================block==========================\n");
   printf("Space Indexs:\n");
@@ -834,6 +1014,8 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(command, "index-summary") == 0) {
       FindRootPage();
       // ShowSpaceIndexs();
+    } else if (strcmp(command, "record-count") == 0) {
+      ShowPrimaryIndexRecStats();
     }
 
   } else {

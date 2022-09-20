@@ -47,6 +47,24 @@ uint64_t mach_read_from_8(const byte *b) {
   return (u64);
 }
 
+/** Read 1 to 4 bytes from a file page buffered in the buffer pool.
+@param[in]      ptr     pointer where to read
+@param[in]      type    MLOG_1BYTE, MLOG_2BYTES, or MLOG_4BYTES
+@return value read */
+uint32_t mach_read_ulint(const byte *ptr, mlog_id_t type) {
+  switch (type) {
+    case MLOG_1BYTE:
+      return (mach_read_from_1(ptr));
+    case MLOG_2BYTES:
+      return (mach_read_from_2(ptr));
+    case MLOG_4BYTES:
+      return (mach_read_from_4(ptr));
+    default:
+      break;
+  }
+
+  ut_a(false);
+}
 
 /** The following function is used to store data in one byte.
 @param[in]	b	pointer to byte where to store
